@@ -11,7 +11,7 @@ matplotlib.use('Agg')
 # Function: Load Data from CSV
 def load_data(csv_file):
     df = pd.read_csv(csv_file)
-    return df['Actual Values'], df['Predicted Values']
+    return df['Actual'], df['Predicted']
 
 # Function: Extract Title and PNG Name
 def extract_title_and_filename(csv_file):
