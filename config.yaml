@@ -1,5 +1,5 @@
 learning_rate: 1e-5
 weight_decay: 0.01
 scheduler_T0: 10
-num_epochs: 5
+num_epochs: 5000
 batch_size: 2048

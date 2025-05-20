@@ -24,15 +24,21 @@ def extract_title_and_filename(csv_file):
 def plot_loss(epoch, train_loss, val_loss, title, png_name):
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.plot(epoch, train_loss, label='Training Loss', linestyle='-', marker='o')
-    ax.plot(epoch, val_loss, label='Validation Loss', linestyle='-', marker='o')
+    ax.plot(epoch, train_loss, label='Training Loss', linestyle='-', marker='.')
+    ax.plot(epoch, val_loss, label='Validation Loss', linestyle='-', marker='.')
 
     ax.set_xlabel('Epoch')
     ax.set_ylabel('Loss')
-    ax.semilogx(True)
     ax.set_title(title)
     ax.legend(loc='best')
     ax.grid(True, linestyle='--', linewidth=0.5, alpha=0.6)
+
+    # Set y-axis limits based on combined min/max of both losses
+    min_loss = min(train_loss.min(), val_loss.min())
+    max_loss = max(train_loss.max(), val_loss.max())
+    margin = (max_loss - min_loss) * 0.1  # add 10% margin
+    ax.set_ylim(min_loss - margin, max_loss + margin)
+    ax.semilogx()
 
     plt.tight_layout()
     plt.savefig(png_name, dpi=300)
