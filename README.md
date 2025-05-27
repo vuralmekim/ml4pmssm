@@ -7,6 +7,8 @@
 2. Run
    ```bash
    cd ml4pmssm
+   conda env create -f environment.yml
+   conda activate ml4pmssm
    chmod +x train_and_plot.sh
    ./train_and_plot.sh <input root file> <config.yaml>
    ```
