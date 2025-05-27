@@ -6,7 +6,7 @@
    ```
 2. Run
    ```bash
-   cd ML4PMSSM
+   cd ml4pmssm
    chmod +x train_and_plot.sh
    ./train_and_plot.sh <input root file> <config.yaml>
    ```
