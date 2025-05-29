@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import OneCycleLR
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import numpy as np
@@ -27,66 +27,84 @@ BRANCHES = [
     "bf_cms_sus_18_004_mu1p0f", "bf_cms_sus_21_007_mb_mu1p0s"
 ]
 
-# Function to load data
 def load_data(filename):
     with uproot.open(filename) as file:
         tree = file[TRENAME]
         data = tree.arrays(BRANCHES, library="pd")
     return data
 
-# Gaussian Rank Transformation
 def gaussian_rank(arr):
     ranked = rankdata(arr, method='average')
     fractional_ranks = (ranked - 0.5) / len(arr)
     return np.maximum(np.sqrt(2) * erfinv(2 * fractional_ranks - 1), 10**-4)
 
-# Feature Engineering with Gaussian Rank Transformations
 def feature_engineering(data):
     mass_features = ['chi10', 'chi20', 'chi1pm', 'chi2pm', 'g', 'M1', 'M2', 'mu']
     for feature in mass_features:
         data[f'gaussian_rank_{feature}'] = gaussian_rank(data[feature])
 
     data['min_squark'] = data[['dL', 'dR', 'uL', 'uR']].min(axis=1)
-    data['min_squark_minus_chi10'] = np.log10(np.maximum(abs(data['min_squark'] - data['chi10'].abs()), 10**-4))
-    data['min_t1_b1_minus_chi10'] = np.log10(np.maximum(abs(data[['t1', 'b1']].min(axis=1) - data['chi10'].abs()), 10**-4))
-    data['chi1pm_minus_chi10'] = np.log10(np.maximum(abs(data['chi1pm'] - data['chi10'].abs()), 10**-4))
-    data['chi1pm_minus_chi20'] = np.log10(np.maximum(abs(data['chi1pm'] - data['chi20'].abs()), 10**-4))
-    data['chi20_minus_chi10'] = np.log10(np.maximum(abs(data['chi20'].abs() - data['chi10'].abs()), 10**-4))
+    data['min_squark_minus_chi10'] = np.log10(data['min_squark'] - data['chi10'].abs())
+    data['min_t1_b1_minus_chi10'] = np.log10(data[['t1', 'b1']].min(axis=1) - data['chi10'].abs())
+    data['chi1pm_minus_chi10'] = np.log10(data['chi1pm'] - data['chi10'].abs())
+    data['chi1pm_minus_chi10'] = np.log10(data['chi1pm'] - data['chi10'].abs())
+    data['chi20_minus_chi10'] = np.log10(data['chi20'].abs() - data['chi10'].abs())
+    data['g_minus_chi10'] = np.log10(data['g'].abs() - data['chi10'].abs())
 
     data['combined_bf'] = data.filter(regex='bf_').prod(axis=1)
 
     input_features = [f'gaussian_rank_{f}' for f in mass_features] + [
         'min_squark_minus_chi10', 'min_t1_b1_minus_chi10', 'chi1pm_minus_chi10',
-        'chi1pm_minus_chi20', 'chi20_minus_chi10'
+        'chi1pm_minus_chi10', 'chi20_minus_chi10','g_minus_chi10'
     ]
 
     return data, input_features
 
-# Stable Model with Clamped Activation
-class StableModel(nn.Module):
-    def __init__(self, input_dim):
+
+class SELUNetwork(nn.Module):
+    def __init__(self, input_dim=27, output_dim=1, hidden_dim=256, depth=8, dropout_rate=0.1):
         super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(input_dim, 512), nn.ELU(), nn.Dropout(0.3),
-            nn.Linear(512, 256), nn.ELU(), nn.Dropout(0.3),
-            nn.Linear(256, 128), nn.ELU(), nn.Dropout(0.3),
-            nn.Linear(128, 1), nn.Softplus()
-        )
+        layers = []
+
+        # Input layer
+        layers.append(nn.Linear(input_dim, hidden_dim))
+        layers.append(nn.SELU())
+        layers.append(nn.AlphaDropout(dropout_rate))
+
+        # Hidden layers
+        for _ in range(depth - 1):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.SELU())
+            layers.append(nn.AlphaDropout(dropout_rate))
+
+        # Output layer
+        layers.append(nn.Linear(hidden_dim, output_dim))
+
+        self.model = nn.Sequential(*layers)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, nonlinearity='linear')  # SELU-compatible
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        return torch.clamp(self.model(x), min=1e-4, max=1e6)
+        return self.model(x)
 
-# Stable Log-Cosh Loss
-class LogCoshLoss(nn.Module):
+
+class RelativeErrorLoss(nn.Module):
+    def __init__(self, eps=1e-8):
+        super().__init__()
+        self.eps = eps
+
     def forward(self, pred, target):
-        diff = torch.clamp(pred - target, -20, 20)
-        return torch.mean(torch.log(torch.cosh(diff)))
+        return torch.mean(torch.abs((pred - target) / (target + self.eps)))
 
-# Training Function with CSV Logging and Model Saving
+    
 def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, config, date_str):
     model_filename = f"model_batchSize{config['batch_size']}_learningRate{config['learning_rate']}_epochs{config['num_epochs']}_{date_str}.pt"
     loss_filename = f"loss_batchSize{config['batch_size']}_learningRate{config['learning_rate']}_epochs{config['num_epochs']}_{date_str}.csv"
-
     best_val_loss = float('inf')
 
     with open(loss_filename, 'w', newline='') as csvfile:
@@ -103,6 +121,7 @@ def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader
                 loss = criterion(outputs, targets)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
                 train_loss += loss.item()
 
             train_loss /= len(train_loader)
@@ -124,25 +143,19 @@ def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader
                 best_val_loss = val_loss
                 torch.save(model.state_dict(), model_filename)
 
-# Evaluation and Saving Function
 def evaluate_and_save_model(model, X_val_tensor, y_val_tensor, config, date_str):
     model.eval()
     with torch.no_grad():
-        predictions = model(X_val_tensor).cpu().numpy().flatten()
-        actuals = y_val_tensor.cpu().numpy().flatten()
+        predictions = 10 ** model(X_val_tensor).cpu().numpy().flatten()
+        actuals = 10 ** y_val_tensor.cpu().numpy().flatten()
     filename = f"predictions_batchSize{config['batch_size']}_learningRate{config['learning_rate']}_epochs{config['num_epochs']}_{date_str}.csv"
-
-    # Create DataFrame with predictions and actuals
     results = pd.DataFrame({'Actual': actuals, 'Predicted': predictions})
-
-    # Construct filename using the model name
     results.to_csv(filename, index=False)
     print(f"Predictions saved to {filename}")
 
-# Main Function
 def main():
     date_str = datetime.now().strftime('%Y%m%d')
-    parser = argparse.ArgumentParser(description='Train StableModel')
+    parser = argparse.ArgumentParser(description='Train Model')
     parser.add_argument('--input_file', type=str, required=True, help='Path to the ROOT file')
     parser.add_argument('--config', type=str, required=True, help='Path to the config file')
     args = parser.parse_args()
@@ -152,26 +165,29 @@ def main():
 
     data = load_data(args.input_file)
     data, input_features = feature_engineering(data)
+    data = data[data['combined_bf'] > 0]
 
     X = data[input_features].values
-    y = data[['combined_bf']].values
+    y = np.log10(data[['combined_bf']].values)
+
 
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    model = StableModel(X_train.shape[1])
+    model = SELUNetwork(input_dim=X_train.shape[1], output_dim=1)
 
-    criterion = LogCoshLoss()
+    criterion = RelativeErrorLoss()
     learning_rate = float(config['learning_rate'])
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=config['weight_decay'])
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=config['scheduler_T0'])
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=float(config['weight_decay']))
+    scheduler = OneCycleLR(optimizer, max_lr=learning_rate, epochs=config['num_epochs'],
+                           steps_per_epoch=len(X_train) // config['batch_size'] + 1, pct_start=0.1, anneal_strategy='cos')
 
-    train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(torch.tensor(X_train, dtype=torch.float32), 
-                                                                              torch.tensor(y_train, dtype=torch.float32)), 
-                                                                              batch_size=config['batch_size'], shuffle=True)
-    
-    val_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(torch.tensor(X_val, dtype=torch.float32), 
-                                                                            torch.tensor(y_val, dtype=torch.float32)), 
-                                                                            batch_size=config['batch_size'])
+    train_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)),
+        batch_size=config['batch_size'], shuffle=True)
+
+    val_loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32)),
+        batch_size=config['batch_size'])
 
     train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, config, date_str)
     evaluate_and_save_model(model, torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32), config, date_str)
